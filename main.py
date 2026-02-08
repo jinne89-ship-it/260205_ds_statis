@@ -1,153 +1,204 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
+
 from utils import (
     load_data,
-    make_kpi,
-    budget_by_dept_and_category,
-    program_list_by_group,
-    top_programs_summary,
+    group_projects,
+    apply_group_order,
+    budget_by_category,
+    budget_by_task,
+    get_group_order,
 )
 
-st.set_page_config(page_title="2025 혁신사업 예산·성과 대시보드", layout="wide")
-st.title("2025 사업(예산·성과) 총장보고 지원 대시보드")
+st.set_page_config(page_title="2025-2026 사업(예산·목표/달성) 대시보드", layout="wide")
+st.title("2025-2026 사업(예산·목표/달성) 총장보고 지원 대시보드")
 
 st.markdown(
     """
-- 입력 파일: CSV 또는 Excel(xlsx)
-- 필수 컬럼(대소문자 무관): 부서, 구분, 사업코드, 사업명, 목표, 달성, 예산, 사용예산, 잔여예산, 담당자
-- (있으면 활용) 사업구분, 사업운영, 세목코드, 세목명, 이후일정, 진행내용 등
+- 업로드 양식(예): 부서, 구분, 특징, 세부과제명, 추진과제명, 사업코드, 사업명, 목표, 달성, 2025예산, 2026목표, 2026예산(선택) 등
+- 동일 사업코드+사업명은 자동으로 그룹핑(예산 합산 / 과제명은 중복 제거 후 병합)
 """
 )
 
 uploaded = st.file_uploader("데이터 파일 업로드 (CSV / XLSX)", type=["csv", "xlsx"])
 if not uploaded:
-    st.info("파일을 업로드하면 부서별/구분별 예산 비율과 구분별 사업 리스트, 성과 요약을 자동 생성합니다.")
+    st.info("파일을 업로드하면 구분별 예산(2025-2026 비교), 목표-달성 비교, 세부/추진과제별 현황을 자동 생성합니다.")
     st.stop()
 
-df = load_data(uploaded)
+raw = load_data(uploaded)
+dfg = group_projects(raw)
+dfg = apply_group_order(dfg)
 
 # -----------------------------
-# Sidebar Filters (연동형)
+# Sidebar filters (연동형)
 # -----------------------------
 with st.sidebar:
     st.header("조회 조건")
 
-    dept_opts = ["(전체)"] + sorted(df["부서"].dropna().unique().tolist())
+    dept_opts = ["(전체)"] + sorted([d for d in dfg["부서"].dropna().unique().tolist() if d != ""])
     dept = st.selectbox("부서", dept_opts, index=0)
 
-    # ✅ dept 선택에 따라 cat 후보를 바꿔줌
-    if dept == "(전체)":
-        cat_base = df
-    else:
-        cat_base = df[df["부서"] == dept]
+    base = dfg if dept == "(전체)" else dfg[dfg["부서"] == dept]
 
-    cat_opts = ["(전체)"] + sorted(cat_base["구분"].dropna().unique().tolist())
+    # 구분 옵션(부서 선택에 따라 다르게)
+    # 정렬 규칙 반영
+    order = get_group_order(dept) if dept != "(전체)" else None
+    if order:
+        cat_opts = ["(전체)"] + [c for c in order if c in base["구분"].unique().tolist()]
+    else:
+        cat_opts = ["(전체)"] + sorted([c for c in base["구분"].dropna().unique().tolist() if c != ""])
     cat = st.selectbox("구분", cat_opts, index=0)
 
-    show_zero_budget = st.checkbox("예산=0 포함", value=False)
+    base2 = base if cat == "(전체)" else base[base["구분"] == cat]
+    feat_opts = ["(전체)"] + sorted([x for x in base2["특징"].dropna().unique().tolist() if str(x).strip() != ""])
+    feat = st.selectbox("특징", feat_opts, index=0)
 
-# -----------------------------
-# Apply filters
-# -----------------------------
-fdf = df.copy()
+# apply filters
+fdf = dfg.copy()
 if dept != "(전체)":
     fdf = fdf[fdf["부서"] == dept]
 if cat != "(전체)":
     fdf = fdf[fdf["구분"] == cat]
-if not show_zero_budget:
-    fdf = fdf[fdf["예산"] > 0]
+if feat != "(전체)":
+    fdf = fdf[fdf["특징"] == feat]
 
-# -----------------------------
-# KPI (필터 반영)
-# -----------------------------
-kpi = make_kpi(fdf)
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("사업 수", kpi["n_projects"])
-c2.metric("총예산", f"{kpi['budget_sum']:,.0f}")
-c3.metric("사용예산", f"{kpi['spent_sum']:,.0f}")
-c4.metric("잔여예산", f"{kpi['remain_sum']:,.0f}")
-c5.metric("집행률", f"{kpi['execution_rate']:.1f}%")
-
-st.divider()
-
-# =========================================================
-# ✅ NEW: 전체 사업 대비 "구분별 예산 비율" 도표 (필터 반영)
-# =========================================================
-st.subheader("A-0. 전체(조회조건 기준) 사업 대비 구분별 예산 비율")
-
-# cat까지 특정하면 구분이 1개가 될 수 있으니, 도표는 (전체)/(부서) 수준에서 보는 게 유용
-chart_base = df.copy()
-if dept != "(전체)":
-    chart_base = chart_base[chart_base["부서"] == dept]
-if not show_zero_budget:
-    chart_base = chart_base[chart_base["예산"] > 0]
-
-by_cat = (
-    chart_base.groupby("구분", as_index=False)["예산"].sum()
-    .sort_values("예산", ascending=False)
-)
-total_budget = float(by_cat["예산"].sum())
-by_cat["비율(%)"] = (by_cat["예산"] / total_budget * 100).round(1) if total_budget > 0 else 0
-
-# 도표 2종(막대 + 파이) 중 택1/택2
-left, right = st.columns([1, 1])
-
-with left:
-    st.caption("구분별 예산 총액(막대)")
-    st.bar_chart(by_cat.set_index("구분")["예산"])
-
-with right:
-    st.caption("구분별 예산 비율(파이)")
-    # streamlit 내장 chart는 pie가 없어서 altair 없이 표+막대 추천
-    # 파이를 꼭 원하면 altair 추가 가능(아래 4) 참고
-    st.dataframe(by_cat[["구분", "예산", "비율(%)"]], use_container_width=True, hide_index=True)
-
-st.divider()
-
-# -----------------------------
-# A) Budget ratio table (필터 반영 버전)
-# -----------------------------
-st.subheader("A. 부서별·구분별 예산 총액 및 비율(예산 기준)")
-
-# ✅ 표도 필터 반영: (전체면 전체, 부서 선택이면 해당 부서만)
-ratio_base = df if dept == "(전체)" else df[df["부서"] == dept]
-if not show_zero_budget:
-    ratio_base = ratio_base[ratio_base["예산"] > 0]
-
-ratio_df = budget_by_dept_and_category(ratio_base)
-st.dataframe(ratio_df, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# -----------------------------
-# B) Program list by group (필터 반영)
-# -----------------------------
-st.subheader("B. 구분별 사업 리스트(성과 포함)")
-
-# ✅ 탭도 조회 조건에 따라 달라지도록
-dept_list = sorted(fdf["부서"].dropna().unique().tolist())
-if not dept_list:
+if fdf.empty:
     st.warning("해당 조건에 해당하는 데이터가 없습니다.")
     st.stop()
 
-group_tabs = st.tabs(dept_list)
+# -----------------------------
+# KPI (예산 합계만)
+# -----------------------------
+total_2025 = float(fdf["2025예산"].sum())
+total_2026 = float(fdf["2026예산"].sum())
+delta = total_2026 - total_2025
 
-for i, dept_name in enumerate(dept_list):
-    with group_tabs[i]:
-        dept_df = fdf[fdf["부서"] == dept_name].copy()
+c1, c2, c3 = st.columns(3)
+c1.metric("사업(그룹) 수", int(len(fdf)))
+c2.metric("2025예산 합계", f"{total_2025:,.0f}")
+c3.metric("2026예산 합계", f"{total_2026:,.0f}", delta=f"{delta:,.0f}")
 
-        cats = sorted(dept_df["구분"].dropna().unique().tolist())
-        if not cats:
-            st.info("해당 부서에 표시할 구분 데이터가 없습니다.")
+st.divider()
+
+# =========================================================
+# A) 구분별 2025-2026 예산 비교 (정렬 규칙 반영)
+# =========================================================
+st.subheader("A. 구분별 예산 비교 (2025 vs 2026)")
+
+cat_df = budget_by_category(fdf)
+
+# 부서별 탭
+dept_list = sorted([d for d in cat_df["부서"].unique().tolist() if d != ""])
+tabs = st.tabs(dept_list) if len(dept_list) > 1 else [st.container()]
+
+for i, d in enumerate(dept_list):
+    with tabs[i] if len(dept_list) > 1 else tabs[0]:
+        sub = cat_df[cat_df["부서"] == d].copy()
+
+        # 정렬 순서 강제
+        order = get_group_order(d)
+        if order:
+            sub["구분"] = pd.Categorical(sub["구분"], categories=order, ordered=True)
+            sub = sub.sort_values("구분")
         else:
-            for cat_name in cats:
-                st.markdown(f"### ▣ {cat_name}")
-                tbl = program_list_by_group(dept_df, cat_name)
-                st.dataframe(tbl, use_container_width=True, hide_index=True)
+            sub = sub.sort_values("2025예산", ascending=False)
 
-        st.divider()
-        st.subheader("C. 총장 보고용 성과 요약(자동 추천 Top 7)")
-        top_tbl, narrative = top_programs_summary(dept_df, top_n=7)
-        st.dataframe(top_tbl, use_container_width=True, hide_index=True)
-        st.markdown("**요약 문장(복사해서 보고서에 붙여넣기)**")
-        st.code(narrative, language="text")
+        # long format for altair grouped bar
+        long = sub.melt(id_vars=["부서", "구분"], value_vars=["2025예산", "2026예산"], var_name="연도", value_name="예산")
+        chart = (
+            alt.Chart(long)
+            .mark_bar()
+            .encode(
+                x=alt.X("구분:N", sort=order if order else "-y", title="구분"),
+                y=alt.Y("예산:Q", title="예산"),
+                color=alt.Color("연도:N"),
+                tooltip=["부서:N", "구분:N", "연도:N", alt.Tooltip("예산:Q", format=",")]
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+        st.dataframe(
+            sub[["구분", "2025예산", "2026예산", "예산증감(2026-2025)"]],
+            use_container_width=True,
+            hide_index=True
+        )
+
+st.divider()
+
+# =========================================================
+# B) 목표-달성 (2025) + 2025-2026 비교
+# =========================================================
+st.subheader("B. 목표-달성 현황 및 2025-2026 비교")
+
+# 표시용 컬럼 구성
+cols = [
+    "부서", "구분", "특징",
+    "세부과제명", "추진과제명",
+    "사업코드", "사업명",
+    "목표", "달성", "2025완료율(%)",
+    "2026목표", "2026달성", "2026완료율(%)",
+    "2025예산", "2026예산", "예산증감(2026-2025)",
+    "담당자", "운영"
+]
+show = fdf[cols].copy()
+
+# 완료율은 보기 좋게 반올림
+show["2025완료율(%)"] = show["2025완료율(%)"].round(1)
+show["2026완료율(%)"] = show["2026완료율(%)"].round(1)
+
+# 테이블 정렬(부서 내 구분 순서 유지)
+if dept != "(전체)":
+    order = get_group_order(dept)
+    if order:
+        show["구분"] = pd.Categorical(show["구분"], categories=order, ordered=True)
+show = show.sort_values(["부서", "구분", "사업코드", "사업명"], na_position="last")
+
+st.dataframe(show, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# =========================================================
+# C) 세부과제명 / 세부과제명-추진과제명 기준 예산 비교
+# =========================================================
+st.subheader("C. 세부과제명 및 세부과제명-추진과제명 예산 비교(2025 vs 2026)")
+
+task_df = budget_by_task(fdf).copy()
+
+# 빈 값 제거(표시 품질)
+task_df = task_df[(task_df["세부과제명"].astype(str).str.strip() != "") | (task_df["추진과제명"].astype(str).str.strip() != "")]
+task_df = task_df.sort_values("2025예산", ascending=False)
+
+# Top-N 선택
+top_n = st.slider("표시할 상위 항목 수(2025예산 기준)", min_value=5, max_value=50, value=15, step=5)
+top_task = task_df.head(top_n).copy()
+top_task["라벨"] = top_task["세부과제명"].fillna("").astype(str).str.strip()
+top_task["라벨"] = top_task["라벨"].where(top_task["라벨"] != "", "(세부과제명 없음)")
+top_task["라벨"] = top_task["라벨"] + " / " + top_task["추진과제명"].fillna("").astype(str).str.strip()
+
+long2 = top_task.melt(
+    id_vars=["부서", "라벨"],
+    value_vars=["2025예산", "2026예산"],
+    var_name="연도",
+    value_name="예산"
+)
+
+chart2 = (
+    alt.Chart(long2)
+    .mark_bar()
+    .encode(
+        y=alt.Y("라벨:N", sort="-x", title="세부과제명 / 추진과제명"),
+        x=alt.X("예산:Q", title="예산"),
+        color=alt.Color("연도:N"),
+        tooltip=["부서:N", "라벨:N", "연도:N", alt.Tooltip("예산:Q", format=",")]
+    )
+    .properties(height=420)
+)
+st.altair_chart(chart2, use_container_width=True)
+
+st.dataframe(
+    top_task[["부서", "세부과제명", "추진과제명", "2025예산", "2026예산", "예산증감(2026-2025)"]],
+    use_container_width=True,
+    hide_index=True
+)
