@@ -65,7 +65,6 @@ with st.sidebar:
 
     base = dfg if dept == "(전체)" else dfg[dfg["부서"] == dept]
 
-    # 구분 옵션은 부서별 순서를 우선 반영
     if dept != "(전체)":
         order = get_group_order(dept) or []
         base_cats = [sanitize_text(x) for x in base["구분"].dropna().unique().tolist() if sanitize_text(x) != ""]
@@ -99,7 +98,7 @@ k3.metric("2026 예산 합계", won(fdf["2026예산"].sum()))
 st.divider()
 
 # =====================================================
-# Ⅰ. 2025 사업 분석 (구분 null/빈값 제외, ✅ 그래프 아래 표)
+# Ⅰ. 2025 사업 분석 (구분 null/빈값 제외)
 # =====================================================
 st.header("Ⅰ. 2025 사업 분석")
 
@@ -107,12 +106,14 @@ fdf_2025 = fdf[~is_blank_series(fdf["구분"])].copy()
 if fdf_2025.empty:
     st.info("2025 사업 분석: (구분이 비어있지 않은) 데이터가 없습니다.")
 else:
+    # -----------------------------
+    # (1) 부서-구분별 2025예산 (그래프 → 표)
+    # -----------------------------
     cat25 = (
         fdf_2025.groupby(["부서", "구분"], as_index=False)["2025예산"]
         .sum()
     )
 
-    # 표시 부서 순서(우선 2개 센터 → 그 외)
     preferred = ["교수학습개발센터", "교육혁신센터"]
     dept_list_25 = [d for d in preferred if d in cat25["부서"].unique().tolist()]
     dept_list_25 += sorted([d for d in cat25["부서"].unique().tolist() if d not in preferred])
@@ -126,12 +127,10 @@ else:
         if order:
             sub["구분"] = pd.Categorical(sub["구분"], categories=order, ordered=True)
             sub = sub.sort_values("구분")
-            # order 밖 값(혹시 있으면) 뒤로
             sub = pd.concat([sub[~sub["구분"].isna()], sub[sub["구분"].isna()]], ignore_index=True)
         else:
             sub = sub.sort_values("2025예산", ascending=False)
 
-        # --- 그래프 (텍스트 라벨 포함) ---
         sub_plot = sub.dropna(subset=["구분"]).copy()
         sub_plot["라벨"] = sub_plot["2025예산"].apply(won)
 
@@ -151,7 +150,6 @@ else:
         labels = chart.mark_text(dy=-8).encode(text="라벨:N")
         st.altair_chart(chart + labels, use_container_width=True)
 
-        # --- 표 (계 + 부서 내 비율, 소수점 1자리) ---
         t = sub_plot[["구분", "2025예산"]].copy()
         dept_total = float(t["2025예산"].sum())
         t["부서내 비율(%)"] = (t["2025예산"] / dept_total * 100).round(1) if dept_total > 0 else 0.0
@@ -171,11 +169,37 @@ else:
             use_container_width=True,
             hide_index=True
         )
-
         st.divider()
 
+    # -----------------------------
+    # ✅ (2) 사업코드-사업명 기준 2025예산 그룹핑 결과(추가)
+    # -----------------------------
+    st.subheader("▣ (추가) 2025 사업코드-사업명 기준 예산 집계")
+
+    proj25 = (
+        fdf_2025.groupby(["사업코드", "사업명"], as_index=False)["2025예산"]
+        .sum()
+    )
+    proj25["사업코드"] = proj25["사업코드"].astype(str).str.strip()
+    proj25["사업명"] = proj25["사업명"].astype(str).str.strip()
+
+    # 정렬: 사업코드 → 사업명
+    proj25 = proj25.sort_values(["사업코드", "사업명"], na_position="last").reset_index(drop=True)
+
+    # 표시용 포맷
+    proj25_disp = proj25.copy()
+    proj25_disp["2025예산"] = proj25_disp["2025예산"].apply(won)
+
+    st.dataframe(
+        proj25_disp[["사업코드", "사업명", "2025예산"]],
+        use_container_width=True,
+        hide_index=True
+    )
+
+st.divider()
+
 # =====================================================
-# Ⅱ. 2026 사업 계획 (그래프 아래 표 유지)
+# Ⅱ. 2026 사업 계획
 # =====================================================
 st.header("Ⅱ. 2026 사업 계획")
 
@@ -227,7 +251,7 @@ for d in dept_list_26:
     st.divider()
 
 # =====================================================
-# Ⅲ. 2025 → 2026 예산 비교 (구분별 2개 막대 비교, 그래프 아래 표)
+# Ⅲ. 2025 → 2026 예산 비교
 # =====================================================
 st.header("Ⅲ. 2025 → 2026 예산 비교")
 
