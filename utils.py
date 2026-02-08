@@ -215,3 +215,13 @@ def budget_by_task(df_grouped: pd.DataFrame) -> pd.DataFrame:
     out = df_grouped.groupby(["부서", "세부과제명", "추진과제명"], as_index=False)[["2025예산", "2026예산"]].sum()
     out["예산증감(2026-2025)"] = out["2026예산"] - out["2025예산"]
     return out
+
+
+def won(x) -> str:
+    try:
+        v = float(x)
+        if pd.isna(v):
+            return ""
+        return f"{int(round(v)):,.0f}원"
+    except Exception:
+        return ""
